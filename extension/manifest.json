@@ -7,6 +7,6 @@
     "default_popup": "popup.html"
   },
   "host_permissions": [
-    "https://recipe-rag-extension.onrender.com*"
+    "https://recipe-rag-extension.onrender.com/*"
   ]
 }
