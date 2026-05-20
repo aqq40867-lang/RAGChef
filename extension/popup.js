@@ -10,7 +10,7 @@ document.getElementById("askBtn").addEventListener("click", async () => {
   answerDiv.innerText = "Thinking...";
 
   try {
-    const response = await fetch("https://recipe-rag-extension.onrender.com", {
+    const response = await fetch("https://recipe-rag-extension.onrender.com/ask", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
