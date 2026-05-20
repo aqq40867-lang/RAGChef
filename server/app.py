@@ -21,3 +21,7 @@ class QueryRequest(BaseModel):
 def ask_question(request: QueryRequest):
     answer = rag.ask(request.question)
     return {"answer": answer}
+
+@app.get("/")
+def root():
+    return {"message": "RAGChef backend is running"}
