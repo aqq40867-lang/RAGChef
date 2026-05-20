@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "RAGChef",
+  "version": "1.0",
+  "description": "An AI-powered recipe assistant using RAG and vector retrieval.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "https://recipe-rag-extension.onrender.com*"
+  ]
+}
