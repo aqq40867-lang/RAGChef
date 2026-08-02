@@ -1,3 +1,23 @@
+// Toggle this to test against your local backend (docker compose up / uvicorn)
+// vs. the deployed Render backend. Switch back to the Render URL before
+// packaging the extension for real use.
+const BACKEND_URL = "http://localhost:8000/ask";
+// const BACKEND_URL = "https://recipe-rag-extension.onrender.com/ask";
+
+// Minimal, dependency-free Markdown renderer: escapes HTML first (so the
+// LLM's response can never inject markup), then converts **bold** and
+// *italic*. Line breaks are handled by the #answer CSS (white-space: pre-wrap).
+function renderMarkdown(text) {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  return escaped
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>");
+}
+
 document.getElementById("askBtn").addEventListener("click", async () => {
   const question = document.getElementById("question").value.trim();
   const answerDiv = document.getElementById("answer");
@@ -10,7 +30,7 @@ document.getElementById("askBtn").addEventListener("click", async () => {
   answerDiv.innerText = "Thinking...";
 
   try {
-    const response = await fetch("https://recipe-rag-extension.onrender.com/ask", {
+    const response = await fetch(BACKEND_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -26,7 +46,7 @@ document.getElementById("askBtn").addEventListener("click", async () => {
     }
 
     const data = JSON.parse(text);
-    answerDiv.innerText = data.answer;
+    answerDiv.innerHTML = renderMarkdown(data.answer);
 
   } catch (error) {
     answerDiv.innerText = "Error: " + error.message;
