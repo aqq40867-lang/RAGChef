@@ -1,3 +1,6 @@
+# Tests the FastAPI app (app.py): / and /ask routes.
+# Covers: root health check, /ask happy path with mocked LLM,
+# /ask returning a friendly 500 on unexpected errors, and 422 on missing "question".
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient

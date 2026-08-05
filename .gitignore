@@ -1,3 +1,5 @@
 .env
 __pycache__/
 *.pyc
+DEVLOG.md
+company infor.docx

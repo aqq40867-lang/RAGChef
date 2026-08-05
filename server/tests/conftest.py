@@ -1,3 +1,7 @@
+# Shared pytest setup for the whole tests/ directory; no test cases here.
+# Covers: adds server/ to sys.path so `import app`/`import rag` work,
+# loads server/.env without overriding existing env vars, and sets a
+# placeholder DEEPSEEK_API_KEY so SimpleRAG can construct its client offline.
 import os
 import sys
 

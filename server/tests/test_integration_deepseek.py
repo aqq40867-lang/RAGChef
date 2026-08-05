@@ -1,14 +1,7 @@
-"""Real end-to-end test that calls the live DeepSeek API.
-
-Skipped by default. To run it:
-
-    export DEEPSEEK_API_KEY=your-real-key
-    export RUN_INTEGRATION_TESTS=1
-    pytest server/tests/test_integration_deepseek.py
-
-This costs a small amount of DeepSeek credit and requires network access,
-which is why it is opt-in rather than part of the default test run.
-"""
+# Real end-to-end test against the live DeepSeek API (no mocking).
+# Covers: SimpleRAG.ask() returns a non-empty string answer for a real query.
+# Skipped by default (needs real DEEPSEEK_API_KEY + RUN_INTEGRATION_TESTS=1),
+# since it costs DeepSeek credit and requires network access.
 import os
 
 import pytest
