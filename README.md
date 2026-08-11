@@ -1,13 +1,17 @@
 # RAGChef
 
-A recipe Q&A tool built on Retrieval-Augmented Generation (RAG): Chrome extension frontend + FastAPI backend. Users ask a question in the extension, the backend retrieves relevant content from a local recipe knowledge base using TF-IDF, then passes it to DeepSeek to generate an answer grounded strictly in the retrieved content.
+A recipe Q&A tool built on Retrieval-Augmented Generation (RAG): Chrome extension frontend + FastAPI backend. Users ask a question in the extension, the backend retrieves relevant content from a local recipe knowledge base using a hybrid of vector (BGE embeddings + FAISS) and keyword (BM25) search, then passes it to DeepSeek to generate an answer grounded strictly in the retrieved content.
 
 ---
 
 # Features
 
-- Recipe Q&A over a knowledge base of 50 English recipes (20 Chinese home-style dishes + 30 British classics), covering meat/vegetarian/soup/staple/dessert
-- TF-IDF retrieval + DeepSeek generation; clearly says so instead of making things up when nothing relevant is found
+- Recipe Q&A over a knowledge base of 50 English recipes (20 Chinese home-style dishes + 30 British classics), one Markdown file per recipe, auto-tagged with category/dish name/difficulty metadata from its folder and content
+- Hybrid retrieval (FAISS vector search + BM25, fused with Reciprocal Rank Fusion) + DeepSeek generation; clearly says so instead of making things up when nothing relevant is found
+- Query routing + 3 generation modes: "recommend a few dishes" gets a plain list of dish names (no LLM call needed), "how do I make X" gets a structured step-by-step answer, everything else gets a plain grounded answer; vague questions are rewritten to be more specific before retrieval
+- Vector index cached to disk and rebuilt automatically only when the recipe files change, so restarts skip re-embedding the whole knowledge base
+- Optional retrieval filtering by category/difficulty, either passed explicitly or inferred from the question text (e.g. "a quick vegetarian recipe")
+- Parent/child chunking with heading-aware splitting (#/##/###) and relevance-ranked deduplication, so a recipe matched on multiple sections outranks one matched on a single fragment
 - Chrome extension frontend for asking questions directly in the browser; FastAPI exposes a `/ask` endpoint
 - Fails fast on missing config (API key / empty knowledge base) at startup; returns a friendly message instead of crashing when the LLM call fails
 - pytest suite covering retrieval logic and the API (with the LLM mocked), plus an optional real DeepSeek integration test
@@ -21,7 +25,9 @@ RAGChef/
 ├── server/
 │   ├── app.py                  # FastAPI entry point, defines the /ask endpoint
 │   ├── rag.py                  # Retrieval and generation logic (SimpleRAG)
-│   ├── data/recipes.md         # Recipe knowledge base
+│   ├── data/recipes/           # Recipe knowledge base, one .md file per recipe,
+│   │                           # grouped into category subfolders (meat_dish/, soup/, ...)
+│   ├── data/vector_index/      # Cached FAISS index (auto-built/rebuilt, gitignored)
 │   ├── tests/                  # pytest tests
 │   ├── Dockerfile
 │   ├── requirements.txt / requirements-dev.txt

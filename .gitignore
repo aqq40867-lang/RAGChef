@@ -3,3 +3,24 @@ __pycache__/
 *.pyc
 DEVLOG.md
 company infor.docx
+
+# Cached FAISS vector index (rebuilt automatically from server/data/recipes/
+# if missing or stale -- see SimpleRAG._build_or_load_vector_index).
+server/data/vector_index/
+
+# Python virtual environments
+.venv/
+.venv-linux/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment files
+.env
+
+# IDE
+.vscode/
+.idea/

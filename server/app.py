@@ -10,6 +10,7 @@ import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from rag import SimpleRAG, RAGConfigError
@@ -28,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RECIPES_PATH = os.path.join(os.path.dirname(__file__), "data", "recipes.md")
+RECIPES_PATH = os.path.join(os.path.dirname(__file__), "data", "recipes")
 
 
 # Build the RAG instance once, at import time, rather than lazily on first
@@ -80,6 +81,44 @@ def ask_question(request: QueryRequest) -> dict:
             detail="Something went wrong while generating the answer. Please try again.",
         )
     return {"answer": answer}
+
+
+@app.post("/ask/stream")
+def ask_question_stream(request: QueryRequest) -> StreamingResponse:
+    """Streaming counterpart of /ask: streams the answer as plain text chunks.
+
+    Used by the Chrome extension so the answer appears incrementally as
+    DeepSeek generates it, instead of the extension staring at "Thinking..."
+    for the entire generation time before anything shows up. The response
+    body is plain UTF-8 text, not JSON or SSE -- there's nothing but answer
+    text to send, so a bare chunked text/plain stream is the whole protocol;
+    the client just needs to read and append.
+
+    Args:
+        request: The parsed request body containing the user's question.
+
+    Returns:
+        A StreamingResponse of the answer text.
+
+    Note:
+        Unlike /ask, an unexpected error here can't turn into a clean HTTP
+        500 once streaming has already started -- some bytes may already be
+        on the wire. rag.ask_stream() itself doesn't raise on expected
+        LLM-provider failures (same as ask()), but if something unexpected
+        still goes wrong mid-stream, it's caught here and appended to the
+        response as a plain-text message instead of surfacing as an HTTP
+        error status, since the status code has already been sent by the
+        time that could happen.
+    """
+    def generate():
+        try:
+            for chunk in rag.ask_stream(request.question):
+                yield chunk
+        except Exception:
+            logger.exception("Unexpected error while streaming answer.")
+            yield "\n\nSomething went wrong while generating the answer. Please try again."
+
+    return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
 
 @app.get("/")

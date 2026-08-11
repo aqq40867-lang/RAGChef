@@ -1,6 +1,15 @@
 fastapi
 uvicorn
 openai
+httpx
 python-dotenv
-scikit-learn
 numpy
+faiss-cpu
+rank-bm25
+sentence-transformers
+
+# sentence-transformers pulls in torch; pin the CPU-only wheel explicitly
+# (via PyTorch's own index) so deploys don't accidentally resolve a much
+# larger CUDA build that isn't needed for this project's scale.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

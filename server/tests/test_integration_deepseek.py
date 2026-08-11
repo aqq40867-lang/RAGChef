@@ -8,7 +8,7 @@ import pytest
 
 from rag import SimpleRAG
 
-RECIPES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "recipes.md")
+RECIPES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "recipes")
 
 _has_real_key = bool(os.environ.get("DEEPSEEK_API_KEY")) and os.environ.get(
     "DEEPSEEK_API_KEY"

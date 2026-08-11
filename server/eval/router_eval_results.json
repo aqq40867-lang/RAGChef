@@ -1,0 +1,223 @@
+{
+  "model": "deepseek-v4-flash",
+  "accuracy": 1.0,
+  "correct": 35,
+  "total": 35,
+  "confusion_matrix": {
+    "list->list": 12,
+    "detail->detail": 11,
+    "general->general": 12
+  },
+  "results": [
+    {
+      "question": "Recommend a few vegetarian dishes.",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "What soups do you have?",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "Give me some quick dinner ideas.",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "What desserts are in your collection?",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "Suggest a few meat dishes.",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "What dishes use chicken?",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "List some easy recipes for beginners.",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "What British classics do you have?",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "Give me a few dish ideas for a dinner party.",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "What Chinese home-style dishes can I make?",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "How do I make Kung Pao Chicken?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "What ingredients do I need for fish and chips?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "What are the steps to make sticky toffee pudding?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "How do I make dumplings (jiaozi) from scratch?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "How do I cook a full English breakfast?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "How long does bakewell tart take to bake?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "What's the recipe for eton mess?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "How do I make mapo tofu?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "Can you walk me through making scones with clotted cream?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "What's the method for making egg drop soup?",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    },
+    {
+      "question": "What's the difference between a casserole and a hotpot?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "What does al dente mean?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "Is Kung Pao Chicken usually very spicy?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "What's the history of Sichuan cuisine?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "Why do we sear meat before braising it?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "What's a good substitute for oyster sauce?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "Roughly how many calories are in a full English breakfast?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "What makes British food different from Chinese home cooking?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "Is this recipe collection vegetarian-friendly overall?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "What's the origin of the word 'dim sum'?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "Kung Pao Chicken or Mapo Tofu — which one is spicier?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "What's a good vegetarian soup I could try?",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "I want to cook something with beef tonight, what do you suggest?",
+      "expected": "list",
+      "predicted": "list",
+      "correct": true
+    },
+    {
+      "question": "Between egg drop soup and hot and sour soup, which is quicker to make?",
+      "expected": "general",
+      "predicted": "general",
+      "correct": true
+    },
+    {
+      "question": "Walk me through prepping the ingredients for Kung Pao Chicken before I start cooking.",
+      "expected": "detail",
+      "predicted": "detail",
+      "correct": true
+    }
+  ]
+}
