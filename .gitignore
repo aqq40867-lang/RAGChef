@@ -24,3 +24,5 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+文档/
