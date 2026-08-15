@@ -3,7 +3,19 @@ uvicorn
 openai
 httpx
 python-dotenv
-numpy
+
+# LangChain: orchestrates the LLM calls (ChatOpenAI, pointed at DeepSeek's
+# OpenAI-compatible endpoint) and the retrieval building blocks (FAISS
+# vector store, BM25Retriever, HuggingFaceEmbeddings, PromptTemplate).
+# See rag.py's module docstring for which parts are still hand-rolled
+# (parent/child chunking, RRF + per-parent score aggregation, TheMealDB
+# fallback) and why.
+langchain
+langchain-core
+langchain-openai
+langchain-community
+langchain-huggingface
+
 faiss-cpu
 rank-bm25
 sentence-transformers

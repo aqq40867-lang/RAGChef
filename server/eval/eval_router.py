@@ -28,6 +28,21 @@ FAISS + BM25 indexes (slow, and irrelevant to what's being measured here),
 this script builds a SimpleRAG instance via __new__ and sets only
 .client/.model directly. If query_router() ever starts reading another
 instance attribute, this shortcut needs to grow the same attribute.
+
+# 中文说明:
+# 这是一个独立的评测脚本,专门评估 rag.py 里 query_router()(问题路由分类器)
+# 在真实 DeepSeek 调用下的准确率。server/tests/ 里的单元测试全部 mock 掉了
+# DeepSeek,只能证明"路由这段代码逻辑没写错"(比如调用失败会兜底成
+# general),没法证明"分类结果本身准不准"——这个脚本就是补这一块的评测。
+#
+# 用法: 在 server 目录下跑 `python eval/eval_router.py`,需要 .env 里配置
+# 真实的 DEEPSEEK_API_KEY(不能用测试用的占位 key,否则每次调用都失败,
+# 全部兜底成 general,测出来的"准确率"没有意义)。
+#
+# 实现上的小技巧: query_router() 只依赖 self.client/self.model,完全不需要
+# 加载菜谱、embedding 模型、FAISS/BM25 索引这些重量级的初始化步骤。所以这
+# 里没有走正常的 SimpleRAG(data_path) 构造流程,而是用 __new__ 跳过 __init__,
+# 手动只设置 client/model 这两个属性,评测跑起来快很多。
 """
 
 import json
@@ -58,6 +73,8 @@ def build_router_only_rag() -> SimpleRAG:
     BM25 setup __init__ normally does) since none of that is needed to
     exercise query_router() -- see module docstring.
     """
+    # 中文: 用 __new__ 绕过 __init__,只手动装配 query_router() 真正需要的两个
+    # 属性(client、model),省掉加载知识库和建索引的开销。
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key or api_key == "test-key-for-unit-tests":
         raise SystemExit(
@@ -73,6 +90,10 @@ def build_router_only_rag() -> SimpleRAG:
 
 
 def main() -> None:
+    # 中文: 读入手工标注的题库(router_questions.json,每条是 question + 期望
+    # 的 expected 路由),逐条跑真实的 query_router(),统计准确率、
+    # 混淆矩阵(期望路由 x 实际预测路由),并把分类错的题目单独列出来,
+    # 最后把完整结果写成 router_eval_results.json 存档。
     with open(DATASET_PATH, encoding="utf-8") as f:
         cases = json.load(f)
 
@@ -106,6 +127,8 @@ def main() -> None:
     print("\n" + "=" * 70)
     print(f"Accuracy: {correct}/{total} = {accuracy:.1%}")
 
+    # 中文: 打印一个 expected(行) x predicted(列)的混淆矩阵,方便一眼看出
+    # 是哪两类之间容易被搞混(比如 detail 常被误判成 general)。
     print("\nConfusion matrix (rows=expected, cols=predicted):")
     routes = sorted(_VALID_ROUTES)
     header = " " * 10 + "".join(f"{r:>10}" for r in routes)

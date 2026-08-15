@@ -1,17 +1,32 @@
 # Tests the FastAPI app (app.py): / and /ask routes.
 # Covers: root health check, /ask happy path with mocked LLM,
 # /ask returning a friendly 500 on unexpected errors, and 422 on missing "question".
-from types import SimpleNamespace
-
+#
+# 中文: LLM 调用通过 rag.llm(LangChain 的 ChatOpenAI)进行,所以这里跟
+# test_ask_mocked.py 一样,在 ChatOpenAI 类上 monkeypatch invoke/stream,
+# 而不是旧版直接 mock rag.client.chat.completions.create。
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_openai import ChatOpenAI
 
 import app as app_module
 
 client = TestClient(app_module.app)
 
 
-def _fake_response(text):
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+def _fake_invoke(text):
+    def invoke(self, *args, **kwargs):
+        return AIMessage(content=text)
+
+    return invoke
+
+
+def _fake_stream(*texts):
+    def stream(self, *args, **kwargs):
+        for t in texts:
+            yield AIMessageChunk(content=t)
+
+    return stream
 
 
 def test_root_endpoint_reports_running():
@@ -21,11 +36,7 @@ def test_root_endpoint_reports_running():
 
 
 def test_ask_endpoint_returns_mocked_answer(monkeypatch):
-    monkeypatch.setattr(
-        app_module.rag.client.chat.completions,
-        "create",
-        lambda **kwargs: _fake_response("Mocked answer."),
-    )
+    monkeypatch.setattr(ChatOpenAI, "invoke", _fake_invoke("Mocked answer."))
 
     resp = client.post("/ask", json={"question": "How do I make dumplings?"})
 
@@ -51,10 +62,11 @@ def test_ask_endpoint_rejects_missing_question_field():
 
 
 def test_ask_stream_endpoint_streams_list_answer_without_llm_call(monkeypatch):
-    def fail(**kwargs):
+    def fail(self, *args, **kwargs):
         raise AssertionError("LLM should not be called for a rule-matched list route")
+        yield  # pragma: no cover - makes this a generator function, never reached
 
-    monkeypatch.setattr(app_module.rag.client.chat.completions, "create", fail)
+    monkeypatch.setattr(ChatOpenAI, "stream", fail)
 
     resp = client.post("/ask/stream", json={"question": "Recommend a few dessert recipes"})
 
@@ -64,19 +76,12 @@ def test_ask_stream_endpoint_streams_list_answer_without_llm_call(monkeypatch):
 
 
 def test_ask_stream_endpoint_returns_streamed_answer(monkeypatch):
-    def fake_create(**kwargs):
-        if not kwargs.get("stream"):
-            return _fake_response("How do I make Kung Pao Chicken?")
-        return [
-            SimpleNamespace(
-                choices=[SimpleNamespace(delta=SimpleNamespace(content="Mocked "))]
-            ),
-            SimpleNamespace(
-                choices=[SimpleNamespace(delta=SimpleNamespace(content="streamed answer."))]
-            ),
-        ]
-
-    monkeypatch.setattr(app_module.rag.client.chat.completions, "create", fake_create)
+    # query_rewrite() makes one non-streaming call (ChatOpenAI.invoke), then
+    # generation streams via ChatOpenAI.stream -- mirror both.
+    monkeypatch.setattr(
+        ChatOpenAI, "invoke", _fake_invoke("How do I make Kung Pao Chicken?")
+    )
+    monkeypatch.setattr(ChatOpenAI, "stream", _fake_stream("Mocked ", "streamed answer."))
 
     resp = client.post("/ask/stream", json={"question": "How do I make Kung Pao Chicken?"})
 
