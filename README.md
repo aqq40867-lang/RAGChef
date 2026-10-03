@@ -12,9 +12,22 @@ A recipe Q&A tool built on Retrieval-Augmented Generation (RAG) with [LangChain]
 - Vector index cached to disk (via the vector store's `save_local`/`load_local`) and rebuilt automatically only when the recipe files change, so restarts skip re-embedding the whole knowledge base
 - Optional retrieval filtering by category/difficulty, either passed explicitly or inferred from the question text (e.g. "a quick vegetarian recipe")
 - Parent/child chunking with heading-aware splitting (#/##/###) and relevance-ranked deduplication, so a recipe matched on multiple sections outranks one matched on a single fragment; this step (and the RRF-based per-parent score aggregation) is hand-rolled rather than a LangChain component — see the module docstring in `rag.py` for why
-- Chrome extension frontend for asking questions directly in the browser; FastAPI exposes a `/ask` endpoint
+- Chrome extension (Manifest V3) popup written in TypeScript: it calls `POST /ask/stream` and renders the answer progressively as it streams in, using a small built-in Markdown renderer that escapes HTML before adding any markup. FastAPI also exposes a non-streaming `POST /ask` endpoint
 - Fails fast on missing config (API key / empty knowledge base) at startup; returns a friendly message instead of crashing when the LLM call fails
 - pytest suite covering retrieval logic and the API (with the LangChain `ChatOpenAI` client mocked), plus an optional real DeepSeek integration test
+- Vitest unit tests for the extension's pure logic (Markdown rendering/escaping, input validation, streamed-response handling), and a GitHub Actions workflow that type-checks, tests and builds the extension on every push
+
+---
+
+# Frontend Tech Stack
+
+The Chrome extension lives in `extension/` and is written in **TypeScript** (`strict`, `noUncheckedIndexedAccess`, no `any`), with Chrome API types from `@types/chrome`.
+
+- **esbuild** bundles `extension/src/popup.ts` into `extension/dist/popup.js`, which `popup.html` loads
+- **tsc** (`tsc --noEmit`) does the type checking only
+- **Vitest** runs the unit tests in `extension/tests/`
+
+The popup's request body (`{ "question": string }`) is typed against the backend's Pydantic `QueryRequest` model. The backend URL is set in one place, `extension/src/config.ts`.
 
 ---
 
@@ -23,7 +36,7 @@ A recipe Q&A tool built on Retrieval-Augmented Generation (RAG) with [LangChain]
 ```text
 RAGChef/
 ├── server/
-│   ├── app.py                  # FastAPI entry point, defines the /ask endpoint
+│   ├── app.py                  # FastAPI entry point, defines /ask and /ask/stream
 │   ├── rag.py                  # Retrieval and generation logic (SimpleRAG), built on LangChain
 │   ├── data/recipes/           # Recipe knowledge base, one .md file per recipe,
 │   │                           # grouped into category subfolders (meat_dish/, soup/, ...)
@@ -33,7 +46,24 @@ RAGChef/
 │   ├── requirements.txt / requirements-dev.txt
 │   └── .env.example
 │
-├── extension/                  # Chrome extension (manifest.json / popup.html / popup.js)
+├── extension/                  # Chrome extension (Manifest V3)
+│   ├── manifest.json
+│   ├── popup.html              # Popup markup + styles; loads dist/popup.js
+│   ├── src/                    # TypeScript source
+│   │   ├── popup.ts            # Entry point: wires the DOM to the API
+│   │   ├── api.ts              # POST /ask/stream + streamed-response reading
+│   │   ├── markdown.ts         # HTML-escaping Markdown renderer
+│   │   ├── validation.ts       # Question input validation
+│   │   ├── messages.ts         # User-facing strings and error formatting
+│   │   ├── dom.ts              # Type-checked element lookup
+│   │   ├── config.ts           # Backend base URL (single source of truth)
+│   │   └── types.ts            # Request/response types for the backend contract
+│   ├── tests/                  # Vitest unit tests
+│   ├── dist/                   # esbuild output (generated, gitignored)
+│   ├── package.json            # build / watch / typecheck / test scripts
+│   └── tsconfig.json
+│
+├── .github/workflows/extension.yml  # CI: typecheck, test, build the extension
 │
 ├── docker-compose.yml          # Local Docker startup
 ├── render.yaml                 # Render deployment config
@@ -60,9 +90,27 @@ docker compose up --build
 
 Runs on `http://127.0.0.1:8000` by default. `GET /` confirms the server is up, `POST /ask` with `{ "question": "..." }` returns an answer.
 
-3. Load the Chrome extension: open `chrome://extensions`, enable "Developer mode" → "Load unpacked" → select the `extension/` directory. If your backend isn't running at the live Render URL, update the request address in `extension/manifest.json` and `popup.js` accordingly.
+3. Build the Chrome extension (requires Node.js 22.12+):
 
-Run tests: `cd server && pip install -r requirements-dev.txt && pytest`
+```bash
+cd extension
+npm ci            # install dependencies from package-lock.json
+npm run build     # bundle src/ into dist/popup.js
+```
+
+Use `npm run watch` to rebuild automatically while editing.
+
+4. Load it into Chrome: open `chrome://extensions`, turn on "Developer mode", click "Load unpacked" and select the `extension/` directory. After rebuilding, click the reload icon on the extension's card. The popup sends requests to `BACKEND_BASE_URL` in `extension/src/config.ts`, which is currently `http://localhost:8000`, with the Render URL commented out next to it. To point at a different backend, change it there, make sure that origin is listed under `host_permissions` in `extension/manifest.json`, and rebuild.
+
+Run tests:
+
+```bash
+# Backend
+cd server && pip install -r requirements-dev.txt && pytest
+
+# Extension
+cd extension && npm run typecheck && npm test
+```
 
 ---
 
