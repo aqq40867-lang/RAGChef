@@ -1,20 +1,22 @@
 # RAGChef
 
-A recipe Q&A tool built on Retrieval-Augmented Generation (RAG) with [LangChain](https://python.langchain.com/): Chrome extension frontend + FastAPI backend. Users ask a question in the extension, the backend retrieves relevant content from a local recipe knowledge base using a hybrid of vector (BGE embeddings via `langchain_huggingface`, indexed with `langchain_community`'s FAISS vector store) and keyword (LangChain's `BM25Retriever`) search, then passes it to DeepSeek — through LangChain's `ChatOpenAI`, pointed at DeepSeek's OpenAI-compatible endpoint — to generate an answer grounded strictly in the retrieved content.
+> **Retrieve, then cook — recipe answers grounded in a real knowledge base, not hallucinated**
+
+A recipe Q&A tool built on Retrieval-Augmented Generation (RAG): Chrome extension frontend + FastAPI backend. Users ask a question in the extension, the backend retrieves relevant content from a local recipe knowledge base using a hybrid of vector (BGE embeddings via `sentence-transformers`, indexed with a `faiss-cpu` `IndexFlatIP`) and keyword (`rank_bm25`'s `BM25Okapi`) search, then passes it to DeepSeek — through the `openai` SDK's `OpenAI` client, pointed at DeepSeek's OpenAI-compatible endpoint — to generate an answer grounded strictly in the retrieved content. No LangChain: retrieval and generation are built directly on the underlying libraries.
 
 ---
 
 # Features
 
 - Recipe Q&A over a knowledge base of 50 English recipes (20 Chinese home-style dishes + 30 British classics), one Markdown file per recipe, auto-tagged with category/dish name/difficulty metadata from its folder and content
-- Hybrid retrieval (LangChain FAISS vector store + LangChain `BM25Retriever`, fused with Reciprocal Rank Fusion) + DeepSeek generation via LangChain's `ChatOpenAI`; clearly says so instead of making things up when nothing relevant is found
-- Query routing + 3 generation modes: "recommend a few dishes" gets a plain list of dish names (no LLM call needed), "how do I make X" gets a structured step-by-step answer, everything else gets a plain grounded answer; vague questions are rewritten to be more specific before retrieval. All prompts are built with LangChain `PromptTemplate`s
-- Vector index cached to disk (via the vector store's `save_local`/`load_local`) and rebuilt automatically only when the recipe files change, so restarts skip re-embedding the whole knowledge base
+- Hybrid retrieval (`faiss-cpu` vector index + `rank_bm25` BM25, fused with Reciprocal Rank Fusion) + DeepSeek generation via the `openai` SDK; clearly says so instead of making things up when nothing relevant is found
+- Query routing + 3 generation modes: "recommend a few dishes" gets a plain list of dish names (no LLM call needed), "how do I make X" gets a structured step-by-step answer, everything else gets a plain grounded answer; vague questions are rewritten to be more specific before retrieval. All prompts are plain string templates filled with `str.format()`
+- Vector index cached to disk (via `faiss.write_index`/`faiss.read_index`) and rebuilt automatically only when the recipe files change, so restarts skip re-embedding the whole knowledge base
 - Optional retrieval filtering by category/difficulty, either passed explicitly or inferred from the question text (e.g. "a quick vegetarian recipe")
-- Parent/child chunking with heading-aware splitting (#/##/###) and relevance-ranked deduplication, so a recipe matched on multiple sections outranks one matched on a single fragment; this step (and the RRF-based per-parent score aggregation) is hand-rolled rather than a LangChain component — see the module docstring in `rag.py` for why
+- Parent/child chunking with heading-aware splitting (#/##/###) and relevance-ranked deduplication, so a recipe matched on multiple sections outranks one matched on a single fragment; this step (and the RRF-based per-parent score aggregation) is hand-rolled project-specific logic — see the module docstring in `rag.py` for why
 - Chrome extension (Manifest V3) popup written in TypeScript: it calls `POST /ask/stream` and renders the answer progressively as it streams in, using a small built-in Markdown renderer that escapes HTML before adding any markup. FastAPI also exposes a non-streaming `POST /ask` endpoint
 - Fails fast on missing config (API key / empty knowledge base) at startup; returns a friendly message instead of crashing when the LLM call fails
-- pytest suite covering retrieval logic and the API (with the LangChain `ChatOpenAI` client mocked), plus an optional real DeepSeek integration test
+- pytest suite covering retrieval logic and the API (with the `openai` client's `chat.completions.create` mocked), plus an optional real DeepSeek integration test
 - Vitest unit tests for the extension's pure logic (Markdown rendering/escaping, input validation, streamed-response handling), and a GitHub Actions workflow that type-checks, tests and builds the extension on every push
 
 ---
@@ -37,10 +39,10 @@ The popup's request body (`{ "question": string }`) is typed against the backend
 RAGChef/
 ├── server/
 │   ├── app.py                  # FastAPI entry point, defines /ask and /ask/stream
-│   ├── rag.py                  # Retrieval and generation logic (SimpleRAG), built on LangChain
+│   ├── rag.py                  # Retrieval and generation logic (SimpleRAG)
 │   ├── data/recipes/           # Recipe knowledge base, one .md file per recipe,
 │   │                           # grouped into category subfolders (meat_dish/, soup/, ...)
-│   ├── data/vector_index/      # Cached LangChain FAISS vector store (auto-built/rebuilt, gitignored)
+│   ├── data/vector_index/      # Cached faiss-cpu vector index (auto-built/rebuilt, gitignored)
 │   ├── tests/                  # pytest tests
 │   ├── Dockerfile
 │   ├── requirements.txt / requirements-dev.txt

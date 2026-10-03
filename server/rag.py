@@ -1,40 +1,37 @@
-"""RAGChef 的核心 RAG(检索增强生成)逻辑 —— LangChain 版本。
+"""RAGChef 的核心 RAG(检索增强生成)逻辑 —— 轻量版,不依赖 LangChain。
 
 整体流程:
 1. 加载: 递归读取知识库目录下的每个 Markdown 文件,生成一个 Recipe(父文档),
    并补全分类/菜名/难度等元数据。
 2. 分块: 把每篇 Recipe 按 "#"/"##"/"###" 标题切成父块(整篇菜谱)+
    若干子块(标题/食材/步骤等)。
-3. 建索引: 用 LangChain 的 HuggingFaceEmbeddings 包装 BGE 句向量模型,
-   把子块编码成向量并交给 langchain_community 的 FAISS 向量库建索引
-   (缓存到磁盘,避免每次启动都重新 embedding);同时用 LangChain 的
-   BM25Retriever 建一份关键词索引(底层仍是 rank_bm25,但由 LangChain
-   统一包装,复用同一套分词器)。
+3. 建索引: 用 sentence-transformers 直接加载 BGE 句向量模型,把子块编码成向量
+   后交给 faiss-cpu 的 IndexFlatIP 建索引(缓存到磁盘,避免每次启动都重新
+   embedding);同时用 rank_bm25 的 BM25Okapi 建一份关键词索引,复用同一套
+   分词器。
 4. 检索: 对每个问题,先按分类/难度(显式传入或从问题文本推断)缩小候选范围,
-   再分别用向量检索(FAISS)和关键词检索(BM25Retriever)产出子块排名,
+   再分别用向量检索(FAISS)和关键词检索(BM25)产出子块排名,
    通过 Reciprocal Rank Fusion(RRF)融合成统一分数;然后按"子块所属的
    父文档"聚合分数,把父文档(菜谱)排序后返回。
 5. 路由: 先用免费的关键词判断(_infer_route)把问题分成 list/detail/general
    三类,判不出来再退回一次 LLM 调用(_classify_and_rewrite)同时完成分类和
    问题改写;关键词判成 detail 的问题仍需单独调用 query_rewrite 做改写,
-   list 问题则原样使用。所有 prompt 都用 LangChain 的 PromptTemplate 构建。
+   list 问题则原样使用。所有 prompt 都是纯字符串模板,用 str.format() 填充。
 6. 生成: 按路由类型分发到对应生成模式——纯格式化的菜名列表、结构化的分步骤回答,
-   或普通的问答——都要求 DeepSeek(通过 LangChain 的 ChatOpenAI,base_url
-   指向 DeepSeek 的 OpenAI 兼容接口)严格依据检索到的内容作答("grounding"),
-   避免模型编造信息。
-7. 兜底: 如果 DeepSeek 判断检索到的本地菜谱都答不了一个 detail/general 问题,
-   ask() 会现查一次 TheMealDB(免费的公开菜谱 API)作为最后一道兜底,而不是
-   直接放弃,见 THEMEALDB_* 和 SimpleRAG._themealdb_fallback()。
+   或普通的问答——都要求 DeepSeek(通过 openai 官方 SDK 的 OpenAI 客户端,
+   base_url 指向 DeepSeek 的 OpenAI 兼容接口)严格依据检索到的内容作答
+   ("grounding"),避免模型编造信息。
 
-# 中文说明: 为什么不是所有环节都用 LangChain 的现成组件?
-# - 父子分块、以及"按父文档聚合子块 RRF 分数"这一步,继续手写
-#   (_rrf_fuse / _rank_documents)。LangChain 的 EnsembleRetriever 也实现了
-#   一样的加权 RRF 公式(默认常数同样是 60),但它只返回融合后的文档列表,
-#   不对外暴露每个候选的分数;而这里需要每个子块的分数去做"父文档累计打分
-#   + 按命中小节数排序 + 去重"这个本项目特有的策略,所以保留自实现,
-#   FAISS/BM25 检索本身仍然换成了 LangChain 的组件。
-# - TheMealDB 兜底、路由关键词预判、难度/分类的关键词推断:都是本项目的
-#   业务逻辑,不是通用 RAG 能力,LangChain 不提供对应组件,继续手写。
+# 中文说明: 为什么不用 LangChain?
+# 这个项目规模小、流程固定,LangChain 在这里只是给 embedding 模型、向量库、
+# BM25、LLM 客户端各包了一层薄封装,没有用到它的 Chain/Agent 之类的重逻辑。
+# 直接调用 sentence-transformers / faiss-cpu / rank_bm25 / openai 这些底层库,
+# 少一层抽象、少几十个用不上的间接依赖(比如 langgraph、langsmith 遥测、
+# SQLAlchemy),也不用跟着 LangChain 的版本节奏走。
+# 父子分块、以及"按父文档聚合子块 RRF 分数"这一步是本项目特有的策略
+# (_rrf_fuse / _rank_documents):需要每个子块的分数去做"父文档累计打分 +
+# 按命中小节数排序 + 去重",所以继续手写,不用某个检索框架的现成组件。
+# 路由关键词预判、难度/分类的关键词推断:同样是本项目的业务逻辑,继续手写。
 """
 
 import hashlib
@@ -45,21 +42,18 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
+import faiss
+import numpy as np
 from dotenv import load_dotenv
-from langchain_community.retrievers import BM25Retriever
-from langchain_community.vectorstores import FAISS
-from langchain_community.vectorstores.utils import DistanceStrategy
-from langchain_core.output_parsers.json import parse_json_markdown
-from langchain_core.prompts import PromptTemplate
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_openai import ChatOpenAI
 from openai import (
     APIConnectionError,
     APIError,
     APITimeoutError,
     AuthenticationError,
+    OpenAI,
 )
+from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -160,18 +154,29 @@ _HEADING_RE = re.compile(r"(?m)^#{1,3}[ \t]+.+$")
 _STEP_RE = re.compile(r"(?m)^\d+\.\s")
 
 # BM25 分词器:转小写后提取字母数字单词,不做词干化/去停用词——
-# 知识库规模小且用词集中,这样已经够用。传给 LangChain 的 BM25Retriever 作为
-# preprocess_func,保证它与旧实现分词一致(而不是用 BM25Retriever 默认的
-# 空白切分)。
+# 知识库规模小且用词集中,这样已经够用。传给 BM25Okapi 前先用它对语料和查询
+# 分好词(BM25Okapi 本身不做分词,只接受 token 列表)。
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# LLM 回复有时会把 JSON 包一层 ```json ... ``` 代码块,这里剥掉围栏再解析;
+# 剥不出代码块就当作回复本身是裸 JSON。
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _parse_json_reply(text: str) -> dict:
+    """从 LLM 回复里解析出 JSON 对象,兼容裸 JSON 和 ```json ... ``` 代码块两种形式。"""
+    match = _JSON_FENCE_RE.search(text)
+    candidate = match.group(1) if match else text.strip()
+    return json.loads(candidate)
+
+
 # ---------------------------------------------------------------------------
-# LangChain PromptTemplate:所有跟 LLM 交互的 prompt 都用模板构建,而不是直接
-# 拼 f-string——好处是模板本身可以被单独测试/复用,变量名也更清晰。
+# Prompt 模板:所有跟 LLM 交互的 prompt 都用模板构建,而不是直接拼 f-string——
+# 好处是模板本身可以被单独测试/复用,变量名也更清晰。用纯字符串 + str.format()
+# 就够了,不需要专门的模板类。
 # ---------------------------------------------------------------------------
 
-ROUTER_PROMPT = PromptTemplate.from_template(
-    """Classify the user's question into exactly one category. Reply with only the category name, nothing else.
+ROUTER_PROMPT = """Classify the user's question into exactly one category. Reply with only the category name, nothing else.
 
 Categories:
 - list: the user wants a list of dish suggestions or names (e.g. "recommend a few vegetarian dishes", "what soups do you have?")
@@ -181,10 +186,8 @@ Categories:
 User question: {question}
 
 Category:"""
-)
 
-REWRITE_PROMPT = PromptTemplate.from_template(
-    """Decide whether this recipe-assistant question needs rewriting to be more specific before searching a recipe database.
+REWRITE_PROMPT = """Decide whether this recipe-assistant question needs rewriting to be more specific before searching a recipe database.
 
 Rules:
 - If the question is already specific (names a dish, an ingredient, or a clear request), return it unchanged.
@@ -194,10 +197,8 @@ Rules:
 Question: {question}
 
 Rewritten question:"""
-)
 
-CLASSIFY_AND_REWRITE_PROMPT = PromptTemplate.from_template(
-    """You are helping a recipe assistant prepare to answer a question. Do two things:
+CLASSIFY_AND_REWRITE_PROMPT = """You are helping a recipe assistant prepare to answer a question. Do two things:
 
 1. Classify the question into exactly one category:
    - list: the user wants a list of dish suggestions or names (e.g. "recommend a few vegetarian dishes", "what soups do you have?")
@@ -209,10 +210,8 @@ Reply with ONLY a JSON object, no other text, in exactly this shape:
 {{"route": "list", "rewritten": "..."}}
 
 User question: {question}"""
-)
 
-STEP_BY_STEP_PROMPT = PromptTemplate.from_template(
-    """You are a professional recipe assistant. Answer the question using ONLY the recipe content below.
+STEP_BY_STEP_PROMPT = """You are a professional recipe assistant. Answer the question using ONLY the recipe content below.
 If the answer is not contained in the content, reply exactly: "{no_results_message}"
 
 Structure your answer in Markdown with exactly these sections:
@@ -231,10 +230,8 @@ Recipe content:
 User question:
 {question}
 """
-)
 
-BASIC_ANSWER_PROMPT = PromptTemplate.from_template(
-    """You are a professional recipe assistant.
+BASIC_ANSWER_PROMPT = """You are a professional recipe assistant.
 
 Answer the question using ONLY the recipe content provided below.
 If the answer is not contained in the content, reply exactly: "{no_results_message}"
@@ -247,7 +244,6 @@ User question:
 
 Respond naturally and concisely in English.
 """
-)
 
 
 class RAGConfigError(RuntimeError):
@@ -264,7 +260,6 @@ class Recipe:
 
     Attributes:
         text: 菜谱的完整 Markdown 内容,包含 "# 标题" 和所有 "## "/"### " 小节。
-        source: 菜谱的来源路径。
         dish_name: 菜名,取自文件名。
         category: 菜谱分类,取自所在的父目录名(如 "meat_dish" -> "Meat");
             如果文件不在已知分类目录下,回退为 "Other"。
@@ -273,23 +268,9 @@ class Recipe:
     """
 
     text: str
-    source: str
     dish_name: str = ""
     category: str = "Other"
     difficulty: str = "Unknown"
-
-
-@dataclass
-class ChildChunk:
-    """子块:菜谱里一个可被检索的片段(标题/食材/步骤等)。
-
-    Attributes:
-        text: 子块的 Markdown 内容,从标题行开始。
-        parent_index: 指向 SimpleRAG.documents 中对应父 Recipe 的下标。
-    """
-
-    text: str
-    parent_index: int
 
 
 class SimpleRAG:
@@ -299,10 +280,10 @@ class SimpleRAG:
         """初始化 RAG 流程:校验配置,加载并索引菜谱。
 
         流程:校验 DEEPSEEK_API_KEY -> 加载菜谱 -> 按标题切成父/子两级 ->
-        加载 LangChain 的 HuggingFaceEmbeddings(包装 BGE 向量模型) ->
-        构建/加载 LangChain FAISS 向量库(有磁盘缓存)-> 构建 LangChain
-        BM25Retriever(不缓存,每次启动都重建)-> 创建 LangChain ChatOpenAI
-        客户端(base_url 指向 DeepSeek)。这是全类里最重的一次性初始化。
+        加载 sentence-transformers 的 BGE 向量模型 -> 构建/加载 faiss-cpu
+        向量索引(有磁盘缓存)-> 构建 BM25Okapi 关键词索引(不缓存,每次启动都
+        重建)-> 创建 openai 的 OpenAI 客户端(base_url 指向 DeepSeek)。这是
+        全类里最重的一次性初始化。
 
         Args:
             data_path: 存放菜谱 Markdown 文件的目录(每篇菜谱一个文件,
@@ -328,49 +309,29 @@ class SimpleRAG:
             )
 
         # 父/子切分
-        self.chunks, self.child_to_parent = self._build_child_chunks(self.documents)
-        self.child_chunks = [chunk.text for chunk in self.chunks]
+        self.child_chunks, self.child_to_parent = self._build_child_chunks(self.documents)
 
-        # 加载向量模型(LangChain 的 HuggingFaceEmbeddings,底层仍是
-        # sentence-transformers,但统一走 LangChain 的 Embeddings 接口,
-        # 这样向量库/未来接入的其它 LangChain 组件都能直接复用它)。
-        self.embedder = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL_NAME,
-            encode_kwargs={"normalize_embeddings": True},
-        )
+        # 第三步 加载向量模型(sentence-transformers 直接加载 BGE 模型,
+        # 编码时统一传 normalize_embeddings=True)
+        self.embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-        # 加载/构建向量库(LangChain 的 FAISS 向量库封装)
+        # 加载/构建向量库(faiss-cpu 原生 IndexFlatIP)
         self.vector_store = self._build_or_load_vector_store(data_path)
 
-        # 构建 BM25 索引(LangChain 的 BM25Retriever,复用同一套分词器)
-        metadatas = [{"chunk_index": i} for i in range(len(self.child_chunks))]
-        self.bm25_retriever = BM25Retriever.from_texts(
-            self.child_chunks, metadatas=metadatas, preprocess_func=self._tokenize
-        )
+        # 构建 BM25 索引(rank_bm25 的 BM25Okapi,复用同一套分词器;不缓存,
+        # 每次启动都重建——语料规模小,重建很快)
+        tokenized_chunks = [self._tokenize(chunk) for chunk in self.child_chunks]
+        self.bm25 = BM25Okapi(tokenized_chunks)
 
-        # 初始化 LLM 客户端(LangChain 的 ChatOpenAI,base_url 指向 DeepSeek
-        # 的 OpenAI 兼容接口;不同调用点各自需要的 temperature 通过
-        # invoke()/stream() 的调用时参数覆盖,见 _complete/_raw_stream_complete)。
+        # 初始化 LLM 客户端(openai 官方 SDK 的 OpenAI 客户端,base_url 指向
+        # DeepSeek 的 OpenAI 兼容接口;model/temperature 都在每次调用时显式
+        # 传入,见 _complete/_raw_stream_complete)。
         self.model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL)
-        self.llm = ChatOpenAI(
-            model=self.model, api_key=api_key, base_url=DEEPSEEK_BASE_URL, temperature=0.3
-        )
+        self.llm = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
 
     # 第一步 加载文档
     def load_documents(self, data_path: str) -> list[Recipe]:
-        """递归读取 data_path 下的每个 Markdown 文件,生成对应的 Recipe。
-
-        Args:
-            data_path: 存放菜谱文件的目录,每个 ".md" 文件对应一篇菜谱,
-                可以按分类分子目录存放(如 data_path/meat_dish/kung-pao-chicken.md)。
-
-        Returns:
-            Recipe 对象列表,每个找到的 Markdown 文件一个,并已通过
-            _enhance_metadata() 补全元数据。
-
-        Raises:
-            RAGConfigError: data_path 不存在或不是目录时抛出。
-        """
+        """递归读取 data_path 下的每个 Markdown 文件,生成对应的 Recipe"""
         root = Path(data_path)
         if not root.is_dir():
             raise RAGConfigError(
@@ -383,7 +344,7 @@ class SimpleRAG:
                 content = f.read().strip()
             if not content:
                 continue
-            recipe = Recipe(text=content, source=str(md_file))
+            recipe = Recipe(text=content)
             self._enhance_metadata(recipe, md_file)
             documents.append(recipe)
 
@@ -420,49 +381,32 @@ class SimpleRAG:
         else:
             recipe.difficulty = "Hard"
 
+    # 第二步 chunk
     def _build_child_chunks(
         self, documents: list[Recipe]
-    ) -> tuple[list[ChildChunk], list[int]]:
-        """把每篇父菜谱按标题边界切成子块。
-
-        每个 "#"、"##" 或 "###" 标题都会开启一个新子块,直到下一个同级或更高级
-        标题为止;这比"只按 ## 切"的旧做法更通用——如果某篇菜谱用了更细的
-        "###" 子小节(比如简易版/进阶版两种做法),也能被切到那个更细的粒度,
-        而不是被整段并入它的父 "## " 小节。
-
-        Args:
-            documents: load_documents() 返回的父菜谱文档列表。
+    ) -> tuple[list[str], list[int]]:
+        """按 #/##/### 标题把每篇菜谱切成父块+子块。
 
         Returns:
-            (chunks, child_to_parent) 二元组:chunks 是所有菜谱切分出的
-            标题/食材/步骤/子小节,child_to_parent[j] 是 chunks[j] 所属父菜谱
-            在 documents 中的下标。
+            (child_chunks, child_to_parent) 二元组:child_chunks 是所有子块的
+            文本,按顺序 0..N-1 排列;child_to_parent 是等长的平行列表,
+            child_to_parent[i] 是第 i 个子块所属的父 Recipe 在
+            SimpleRAG.documents 里的下标。两者靠下标对齐,不需要额外的包装
+            对象来携带这个映射。
         """
-        chunks: list[ChildChunk] = []
+        child_chunks: list[str] = []
         child_to_parent: list[int] = []
 
         for parent_index, recipe in enumerate(documents):
             for section in self._split_by_headings(recipe.text):
-                chunks.append(ChildChunk(text=section, parent_index=parent_index))
+                child_chunks.append(section)
                 child_to_parent.append(parent_index)
 
-        return chunks, child_to_parent
+        return child_chunks, child_to_parent
 
     @staticmethod
     def _split_by_headings(text: str) -> list[str]:
-        """按 "#"/"##"/"###" 标题把文本切成多段,每个标题对应一段。
-
-        每段从一个标题行开始,到下一个 1-3 级标题行之前结束(不含该标题行),
-        所以嵌在 "## " 小节里的 "### " 子标题会被切成独立的一段,
-        而不是并入它的父小节。
-
-        Args:
-            text: 要切分的 Markdown 文本(通常是一整篇菜谱)。
-
-        Returns:
-            按文档顺序排列的非空分段字符串列表。如果文本里没有任何标题,
-            整段(去除首尾空白后)作为单独一个分段返回。
-        """
+        """按 "#"/"##"/"###" 标题把文本切成多段,每个标题对应一段"""
         matches = list(_HEADING_RE.finditer(text))
         if not matches:
             stripped = text.strip()
@@ -481,38 +425,27 @@ class SimpleRAG:
     def _tokenize(text: str) -> list[str]:
         """BM25 用的分词器:转小写、提取字母数字单词。
 
-        作为 preprocess_func 传给 LangChain 的 BM25Retriever。
+        BM25Okapi 本身不做分词,只接受 token 列表,所以语料和查询都要先经过
+        这个函数(见 __init__ 里建索引、_bm25_search 里查询)。
         """
         return _TOKEN_RE.findall(text.lower())
 
-    def _build_or_load_vector_store(self, data_path: str) -> FAISS:
-        """构建 child_chunks 的 LangChain FAISS 向量库,或从磁盘加载已缓存的向量库。
+    # 第四步 入库
+    def _build_or_load_vector_store(self, data_path: str) -> "faiss.Index":
+        """构建/加载 child_chunks 的 faiss 向量索引(原生 faiss-cpu)。
 
-        沿用参考项目的索引缓存思路(先 embedding 一次、存盘,后续启动直接加载,
-        而不是每次都重新 embedding 所有子块),并多加了一步:缓存里记录了子块内容的
-        哈希值,一旦知识库发生变化就能识别出缓存已过期并自动重建,
-        而不是悄悄地继续用过期的向量。
-
-        distance_strategy 用 MAX_INNER_PRODUCT:embedding 已经做过 L2 归一化,
-        内积等价于余弦相似度,分数越高越相关(与旧版直接用 faiss.IndexFlatIP
-        的语义一致)。
-
-        Args:
-            data_path: 传给 __init__ 的菜谱目录;缓存存放在其同级的
-                "vector_index/" 目录下。
-
-        Returns:
-            对 self.child_chunks(已归一化)向量建立的 LangChain FAISS 向量库,
-            每个文档的 metadata 里带 chunk_index,顺序与 child_chunks 一致。
+        子块是按顺序 0..N-1 加入索引的,所以 faiss 检索返回的行号本身就是
+        chunk_index,不需要额外维护一份 id 映射/docstore。
         """
         index_dir = Path(data_path).parent / "vector_index"
+        index_path = index_dir / "index.faiss"
         meta_path = index_dir / "meta.json"
 
         content_hash = hashlib.sha256(
             "\n".join(self.child_chunks).encode("utf-8")
         ).hexdigest()
 
-        if index_dir.exists() and meta_path.exists():
+        if index_path.exists() and meta_path.exists():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -523,12 +456,10 @@ class SimpleRAG:
             ):
                 try:
                     logger.info("Loading cached vector index from %s", index_dir)
-                    return FAISS.load_local(
-                        str(index_dir), self.embedder, allow_dangerous_deserialization=True
-                    )
-                except (OSError, RuntimeError, ValueError, ModuleNotFoundError):
-                    # 缓存文件损坏,或来自旧版(非 LangChain)的索引格式 —— 兜底
-                    # 重建,而不是让启动直接崩溃。
+                    return faiss.read_index(str(index_path))
+                except RuntimeError:
+                    # 缓存文件损坏,或来自旧版索引格式 —— 兜底重建,
+                    # 而不是让启动直接崩溃。
                     logger.warning(
                         "Vector index cache at %s could not be loaded; rebuilding.",
                         index_dir,
@@ -542,16 +473,16 @@ class SimpleRAG:
             len(self.child_chunks),
             EMBEDDING_MODEL_NAME,
         )
-        metadatas = [{"chunk_index": i} for i in range(len(self.child_chunks))]
-        vector_store = FAISS.from_texts(
-            self.child_chunks,
-            self.embedder,
-            metadatas=metadatas,
-            distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT,
+        vectors = self.embedder.encode(
+            self.child_chunks, normalize_embeddings=True, show_progress_bar=False
         )
+        vectors = np.asarray(vectors, dtype="float32")
+
+        index = faiss.IndexFlatIP(vectors.shape[1])
+        index.add(vectors)
 
         index_dir.mkdir(parents=True, exist_ok=True)
-        vector_store.save_local(str(index_dir))
+        faiss.write_index(index, str(index_path))
         meta_path.write_text(
             json.dumps(
                 {
@@ -562,17 +493,18 @@ class SimpleRAG:
             ),
             encoding="utf-8",
         )
-        return vector_store
+        return index
 
+    # 线上 第二步·向量检索(粗排)
     def _vector_search(
         self, question: str, k: int, allowed: set[int] | None = None
     ) -> list[int]:
         """按向量余弦相似度返回最多 k 个子块下标。
 
-        通过 LangChain FAISS 向量库的 similarity_search_with_score 对整个索引
-        排序(k 传入语料库全量大小,拿到完整排名),再在 Python 里按 allowed
-        过滤——FAISS 向量库本身不理解我们的分类/难度元数据过滤,所以策略与
-        旧版一致:先在整个索引里搜索,再过滤,而不是把过滤下推到 ANN 搜索本身。
+        通过 faiss 索引的 search() 对整个索引排序(k 传入语料库全量大小,
+        拿到完整排名),再在 Python 里按 allowed 过滤——faiss 本身不理解我们的
+        分类/难度元数据过滤,所以策略与旧版一致:先在整个索引里搜索,再过滤,
+        而不是把过滤下推到 ANN 搜索本身。
 
         Args:
             question: 查询文本。
@@ -583,11 +515,13 @@ class SimpleRAG:
         Returns:
             按相关性从高到低排序的子块下标列表。
         """
-        total = self.vector_store.index.ntotal
+        total = self.vector_store.ntotal
         if total == 0 or k <= 0:
             return []
-        docs_and_scores = self.vector_store.similarity_search_with_score(question, k=total)
-        ranked = [int(doc.metadata["chunk_index"]) for doc, _ in docs_and_scores]
+        query_vec = self.embedder.encode([question], normalize_embeddings=True)
+        query_vec = np.asarray(query_vec, dtype="float32")
+        _, ids = self.vector_store.search(query_vec, total)
+        ranked = [int(i) for i in ids[0] if i != -1]
         if allowed is not None:
             ranked = [i for i in ranked if i in allowed]
         return ranked[:k]
@@ -597,9 +531,8 @@ class SimpleRAG:
     ) -> list[int]:
         """按 BM25 分数返回最多 k 个子块下标。
 
-        通过 LangChain 的 BM25Retriever 对整个语料库排序(临时把 .k 设成语料库
-        全量大小,拿到完整排名,不影响相对顺序,只影响截断位置),再在 Python
-        里按 allowed 过滤,与 _vector_search 的过滤策略保持一致。
+        BM25Okapi.get_scores() 直接返回语料库全量的分数数组,在 Python 里按
+        分数排序后再按 allowed 过滤,与 _vector_search 的过滤策略保持一致。
 
         Args:
             question: 查询文本。
@@ -612,13 +545,13 @@ class SimpleRAG:
         """
         if k <= 0 or not self.child_chunks:
             return []
-        self.bm25_retriever.k = len(self.child_chunks)
-        docs = self.bm25_retriever.invoke(question)
-        ranked = [int(doc.metadata["chunk_index"]) for doc in docs]
+        scores = self.bm25.get_scores(self._tokenize(question))
+        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         if allowed is not None:
             ranked = [i for i in ranked if i in allowed]
         return ranked[:k]
 
+    # 线上 第四步 rerank精排
     @staticmethod
     def _rrf_fuse(*ranked_lists: list[int], k: int = RRF_K) -> dict[int, float]:
         """Reciprocal Rank Fusion:把多路排名列表融合成一个分数字典。
@@ -678,6 +611,7 @@ class SimpleRAG:
         )
         return category, difficulty
 
+    # 第一步 query处理
     def _infer_route(self, question: str) -> str | None:
         """用关键词判断问题是 list 还是 detail,不调用 LLM。
 
@@ -731,6 +665,7 @@ class SimpleRAG:
             )
         ]
 
+    # 第四步 检索
     def _rank_documents(
         self,
         question: str,
@@ -738,35 +673,7 @@ class SimpleRAG:
         category: str | None = None,
         difficulty: str | None = None,
     ) -> list[Recipe]:
-        """返回与问题最相关的 top_k 篇父 Recipe 对象。
-
-        检索发生在子块粒度上(标题/食材/步骤分别比较),融合两路互补信号:
-        LangChain FAISS 向量库检索(基于 BGE 向量的语义相似度——能让"a quick
-        meal"匹配上标了 Easy 难度的菜谱)和 LangChain BM25Retriever(词面
-        匹配——能精确命中菜名和食材)。两路排名用 Reciprocal Rank Fusion 融合,
-        避免单一信号说了算。
-
-        如果没有显式传入 category/difficulty,会先从问题文本里启发式推断
-        (见 _infer_filters)并用来缩小搜索范围;如果这个过滤条件会导致
-        一篇菜谱都匹配不上,就丢弃过滤、回退到全库搜索,而不是直接返回空结果。
-
-        父菜谱按其贡献的子块(取自融合排名前列的候选子块)RRF 分数之和排序
-        (奖励在多个小节都命中的菜谱,而不是只在一个小节强匹配的菜谱;
-        同时仍以匹配强度加权,避免几个弱匹配的小节反而压过一个强匹配)。
-        如果候选子块覆盖不到 top_k 篇不同的父菜谱,剩余名额从完整的融合排名里
-        依次补齐,确保 retrieve() 总能返回 min(top_k, 匹配到的文档数) 篇结果。
-
-        Args:
-            question: 用户的自然语言问题。
-            top_k: 最多返回的父菜谱数量。
-            category: 可选的显式分类过滤(如 "Vegetable"),覆盖从问题文本
-                推断出的结果。
-            difficulty: 可选的显式难度过滤(如 "Easy"),覆盖从问题文本
-                推断出的结果。
-
-        Returns:
-            最多 top_k 篇父 Recipe 对象,按相关性从高到低排序。
-        """
+        """返回与问题最相关的 top_k 篇父 Recipe 对象"""
         top_k = min(top_k, len(self.documents))
         if top_k == 0:
             return []
@@ -834,164 +741,31 @@ class SimpleRAG:
         selected = ranked_parents[:top_k]
         return [self.documents[i] for i in selected]
 
-    @staticmethod
-    def _themealdb_dish_query(question: str) -> str:
-        """从问题里提取一个接近裸菜名的字符串,供 TheMealDB 名字搜索使用。
-
-        TheMealDB 的 search.php?s= 是按菜名匹配,不是自由文本搜索,
-        所以 "How do I make Kung Pao Chicken?" 需要先变成大致
-        "Kung Pao Chicken" 这样的形式。
-
-        Args:
-            question: 用户的(可能已被改写的)问题。
-
-        Returns:
-            去掉开头提问句式(如果有)和结尾 "?" 后的问题文本。
-            如果去除后什么都不剩,回退返回原始文本。
-        """
-        text = question.strip().rstrip("?").strip()
-        cleaned = _THEMEALDB_STRIP_RE.sub("", text, count=1).strip()
-        return cleaned or text
-
-    @staticmethod
-    def _themealdb_get(path: str, params: dict) -> dict | None:
-        """向 TheMealDB 某个接口发 GET 请求,返回解析后的 JSON,失败则返回 None。
-
-        永远不抛异常:网络错误、非 2xx 响应、无法解析的响应体都会被记录日志
-        并当作"没有数据"处理,这样 TheMealDB 故障只会降级成已有的
-        NO_RESULTS_MESSAGE 行为,而不会把 ask() 弄崩。
-
-        Args:
-            path: 接口路径,如 "/search.php"。
-            params: 请求的查询参数。
-
-        Returns:
-            解析后的 JSON 响应体;请求或解析失败则返回 None。
-        """
-        try:
-            response = httpx.get(
-                THEMEALDB_BASE_URL + path, params=params, timeout=THEMEALDB_TIMEOUT
-            )
-            response.raise_for_status()
-            return response.json()
-        except (httpx.HTTPError, ValueError):
-            logger.warning("TheMealDB request to %s failed.", path, exc_info=True)
-            return None
-
-    @staticmethod
-    def _themealdb_meal_to_recipe(meal: dict) -> Recipe:
-        """把 TheMealDB 返回的菜谱 JSON 对象转换成本项目的 Recipe。
-
-        重新拼出与本地知识库一致的 "# 标题" / "## Ingredients" / "## Steps"
-        Markdown 结构,这样这个 Recipe 就能直接复用现有的生成 prompt,
-        不用为外部数据再写一套模板。
-
-        Args:
-            meal: TheMealDB search/lookup 响应里 "meals" 列表中的一个元素。
-
-        Returns:
-            难度固定为 "Unknown"(TheMealDB 不提供难度评级),
-            source 设为 "themealdb:<idMeal>" 的 Recipe。
-        """
-        ingredient_lines = []
-        for i in range(1, 21):
-            name = (meal.get(f"strIngredient{i}") or "").strip()
-            if not name:
-                continue
-            measure = (meal.get(f"strMeasure{i}") or "").strip()
-            ingredient_lines.append(f"- {measure + ' ' if measure else ''}{name}".rstrip())
-
-        step_lines = [
-            line.strip(" -")
-            for line in re.split(r"\r?\n+", meal.get("strInstructions") or "")
-            if line.strip(" -")
-        ]
-        numbered_steps = [f"{i}. {line}" for i, line in enumerate(step_lines, start=1)]
-
-        dish_name = meal.get("strMeal") or "Unknown dish"
-        text = (
-            f"# {dish_name}\n\n"
-            "## Ingredients\n" + "\n".join(ingredient_lines) + "\n\n"
-            "## Steps\n" + "\n".join(numbered_steps)
-        )
-
-        return Recipe(
-            text=text,
-            source=f"themealdb:{meal.get('idMeal', '')}",
-            dish_name=dish_name.lower(),
-            category=THEMEALDB_CATEGORY_MAP.get(meal.get("strCategory", ""), "Other"),
-            difficulty="Unknown",
-        )
-
-    def _themealdb_fallback(self, question: str, category: str | None = None) -> Recipe | None:
-        """本地知识库查不到答案时,从 TheMealDB 现查一篇菜谱兜底。
-
-        先按菜名做近似搜索(search.php?s=);如果搜不到,且问题推断出了本地分类,
-        就改用该分类过滤搜索(filter.php?c=...),并对第一个候选取完整详情
-        (lookup.php?i=...)。这是按需调用,不是预先抓取,所以最多只会为回答
-        当前问题多发一到两个 API 请求。
-
-        Args:
-            question: 用户的(可能已被改写的)问题。
-            category: 可选的本地分类标签(如 "Vegetable"),当名字搜索没结果时
-                用于选取对应的 TheMealDB 分类过滤。
-
-        Returns:
-            根据 TheMealDB 响应构建的 Recipe;如果没查到、兜底被关闭,
-            或 API 调用失败,则返回 None。
-        """
-        if not THEMEALDB_ENABLED:
-            return None
-
-        data = self._themealdb_get("/search.php", {"s": self._themealdb_dish_query(question)})
-        meals = (data or {}).get("meals") or []
-
-        if not meals:
-            themealdb_category = THEMEALDB_LOCAL_TO_CATEGORY.get(category or "")
-            if themealdb_category:
-                filtered = self._themealdb_get("/filter.php", {"c": themealdb_category})
-                candidates = (filtered or {}).get("meals") or []
-                if candidates:
-                    looked_up = self._themealdb_get(
-                        "/lookup.php", {"i": candidates[0]["idMeal"]}
-                    )
-                    meals = (looked_up or {}).get("meals") or []
-
-        if not meals:
-            return None
-
-        logger.info(
-            "No local match for %r; falling back to TheMealDB (%s).",
-            question,
-            meals[0].get("strMeal"),
-        )
-        return self._themealdb_meal_to_recipe(meals[0])
-
     def _complete(self, prompt: str, temperature: float = 0.3) -> str | None:
-        """发一次单轮对话请求给 DeepSeek(通过 LangChain 的 ChatOpenAI),吞掉
-        常见的调用失败异常。
+        """发一次单轮对话请求给 DeepSeek(通过 openai 官方 SDK 的 OpenAI 客户端),
+        吞掉常见的调用失败异常。
 
         把这个模块调用 DeepSeek 的 4 处地方(query_router、query_rewrite,
         以及两种基于 prompt 的生成模式)共用的 try/except 逻辑集中在这里,
         这样各处只需要处理"拿到 None 该怎么办",不用各写一遍相同的
-        except 代码块。LangChain 的 ChatOpenAI 在底层调用失败时会原样抛出
-        openai SDK 的异常(不会吞掉或包装成别的类型),所以这里捕获的异常类型
-        与旧版直接用 openai.OpenAI 客户端时完全一致。
+        except 代码块。
 
         Args:
-            prompt: 作为单条用户消息发送的完整 prompt(纯文本,不是 ChatPromptTemplate
-                的消息列表——ChatOpenAI.invoke() 接受纯字符串输入,会自动包装成
-                一条 HumanMessage)。
+            prompt: 作为单条用户消息发送的完整 prompt(纯文本,包装成
+                chat.completions.create() 的一条 user 角色消息)。
             temperature: 采样温度——分类/改写这类需要稳定、字面结果的调用
-                用接近 0 的低值;开放式生成用更高的值。通过 invoke() 的调用时
-                参数覆盖 self.llm 构造时的默认温度。
+                用接近 0 的低值;开放式生成用更高的值。每次调用都显式传入。
 
         Returns:
             模型的回复文本;调用失败(鉴权/网络/超时/API 错误)或返回空内容
             则返回 None。调用方自行决定 None 对自己意味着什么、要不要记日志。
         """
         try:
-            response = self.llm.invoke(prompt, temperature=temperature)
+            response = self.llm.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+            )
         except AuthenticationError:
             logger.error("DeepSeek authentication failed - check DEEPSEEK_API_KEY.")
             return None
@@ -1002,7 +776,7 @@ class SimpleRAG:
             logger.exception("DeepSeek API returned an error.")
             return None
 
-        content = response.content
+        content = response.choices[0].message.content
         return content.strip() if content else None
 
     def query_router(self, question: str) -> str:
@@ -1051,9 +825,8 @@ class SimpleRAG:
         这是 ask() 在 _infer_route() 无法从关键词自信地判断出结果时才会
         走到的兜底路径——也是唯一还需要 LLM 判断的情况。
 
-        JSON 解析用 LangChain 的 parse_json_markdown(langchain_core.output_parsers)
-        —— 它本身就是为"LLM 回复有时会把 JSON 包一层 ```json ... ``` 代码块"
-        这个场景设计的,比手写正则剥代码块围栏更少踩坑。
+        JSON 解析用模块顶部的 _parse_json_reply():先尝试剥掉 ```json ... ```
+        代码块围栏,剥不出来就当作回复本身是裸 JSON,再交给 json.loads()。
 
         Args:
             question: 用户的自然语言问题。
@@ -1067,7 +840,7 @@ class SimpleRAG:
         reply = self._complete(prompt, temperature=0)
         if reply:
             try:
-                data = parse_json_markdown(reply)
+                data = _parse_json_reply(reply)
                 route = str(data.get("route", "")).strip().lower()
                 rewritten = str(data.get("rewritten", "")).strip()
             except (json.JSONDecodeError, AttributeError, TypeError):
@@ -1077,6 +850,7 @@ class SimpleRAG:
             logger.warning("Could not parse classify_and_rewrite reply: %r", reply)
         return ROUTE_GENERAL, question
 
+    # 线上第五步 生成
     def _generate_list_answer(self, docs: list[Recipe]) -> str:
         """把菜名格式化成编号列表——不调用 LLM。
 
@@ -1146,8 +920,7 @@ class SimpleRAG:
         `for` 循环里是拿不到的:
             - state["is_no_results"]: docs 为空,或流式回复完整拼起来正好
               等于 NO_RESULTS_MESSAGE 时为 True(此时什么都不会 yield,
-              这样调用方可以在任何内容到达用户之前先悄悄尝试 TheMealDB 兜底——
-              见 ask_stream())。
+              由调用方决定接下来要不要输出这条提示语——见 ask_stream())。
             - state["failed"]: LLM 调用本身失败(鉴权/网络/超时/API 错误),
               且没有产出任何内容时为 True。
 
@@ -1216,15 +989,15 @@ class SimpleRAG:
             yield LLM_UNAVAILABLE_MESSAGE
 
     def _raw_stream_complete(self, prompt: str, temperature: float = 0.3):
-        """流式发送单轮对话请求(通过 LangChain 的 ChatOpenAI.stream()),边到达
-        边 yield 出文本片段。
+        """流式发送单轮对话请求(通过 openai 客户端的
+        chat.completions.create(stream=True)),边到达边 yield 出文本片段。
 
         _complete() 的流式版本:失败处理逻辑相同(鉴权/连接/超时/API 错误
         都会被记录并吞掉,而不是抛出),区别是不在最后一次性返回完整文本,
-        而是 DeepSeek 每发来一段就 yield 一段(ChatOpenAI.stream() 返回的每个
-        chunk 是一个 AIMessageChunk,其 .content 就是这次增量的文本)。如果失败
-        发生在第一段内容到达之前,则完全不会产出任何片段;如果发生在响应中途,
-        流会提前中止——仅凭这个方法本身无法区分这两种情况(见
+        而是 DeepSeek 每发来一段就 yield 一段(每个 chunk 是一个
+        ChatCompletionChunk,其 .choices[0].delta.content 就是这次增量的文本)。
+        如果失败发生在第一段内容到达之前,则完全不会产出任何片段;如果发生在
+        响应中途,流会提前中止——仅凭这个方法本身无法区分这两种情况(见
         _stream_with_no_results_guard(),它专门跟踪了"到底有没有收到过任何内容")。
 
         Args:
@@ -1235,8 +1008,14 @@ class SimpleRAG:
             按顺序产出的非空文本片段。
         """
         try:
-            for chunk in self.llm.stream(prompt, temperature=temperature):
-                delta = chunk.content
+            stream = self.llm.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
                 if delta:
                     yield delta
         except AuthenticationError:
@@ -1251,8 +1030,8 @@ class SimpleRAG:
 
         非流式的生成方法能直接判断 `answer == NO_RESULTS_MESSAGE`,
         是因为它们会等完整回复到达后再做判断。如果流式版本直接把内容原样
-        转发给客户端,就会出现"没有找到相关信息"这句话已经开始显示、
-        ask_stream() 才想起来要悄悄转去用 TheMealDB 重试的尴尬情况。
+        转发给客户端,"没有找到相关信息"这句话就会被逐字符地流式显示出来,
+        而不是作为一个整体的提示语出现。
 
         这个方法在不增加额外 LLM 调用的前提下堵上了这个缺口:只要缓冲区内容
         仍然可能是 NO_RESULTS_MESSAGE 的前缀,就先按住不输出;一旦流式文本
@@ -1317,15 +1096,11 @@ class SimpleRAG:
             并转成 LLM_UNAVAILABLE_MESSAGE 返回(list 类回答除外,
             它根本不调用 LLM,所以不存在这种失败)。
         """
+        # 输入校验
         if not question or not question.strip():
             return "Please enter a question."
 
-        # 快速路径:先尝试用关键词本地分类(零 LLM 调用),再考虑要不要付出一次
-        # DeepSeek 往返的代价。命中 "list" 会完全跳过 query_rewrite(list 问题
-        # 照旧原样使用);命中 "detail" 仍需要调用 query_rewrite(它的职责——
-        # 让问题更具体——与路由分类是相互独立的)。只有两种关键词模式都判不出来的
-        # 问题才会落到 LLM,而 LLM 这一次会把分类和改写合并成一次调用完成,
-        # 而不是像以前那样分两次单独调用。
+        # query 处理
         route = self._infer_route(question)
         if route == ROUTE_LIST:
             search_query = question
@@ -1335,45 +1110,31 @@ class SimpleRAG:
             route, search_query = self._classify_and_rewrite(question)
 
         top_k = LIST_MODE_TOP_K if route == ROUTE_LIST else 2
+        # 检索
         docs = self._rank_documents(search_query, top_k=top_k)
 
         if route == ROUTE_LIST:
             return self._generate_list_answer(docs)
 
+        # 生成
         generate = (
             self._generate_step_by_step_answer
             if route == ROUTE_DETAIL
             else self._generate_basic_answer
         )
         answer = generate(question, docs)
-
-        # _rank_documents 总是尽力返回它认为最匹配的 top_k 篇文档——哪怕
-        # 其实并不真正相关——而不是返回空列表,因为 RRF 只是对整个(过滤后的)
-        # 语料库排序、取前几名。所以"本地库里没有相关内容"不会表现为 docs 为空,
-        # 而是表现在这里:LLM 自己判断检索到的内容答不了这个问题(两种生成 prompt
-        # 都被要求在这种情况下原样回复 NO_RESULTS_MESSAGE)。只有到这一步,
-        # 才值得多花一次网络往返去试试 TheMealDB。
-        if answer == NO_RESULTS_MESSAGE:
-            category, _ = self._infer_filters(search_query)
-            fallback_recipe = self._themealdb_fallback(search_query, category=category)
-            if fallback_recipe:
-                answer = generate(question, [fallback_recipe])
-
         return answer
 
     def ask_stream(self, question: str):
         """ask() 的流式版本:增量地把答案 yield 出去。
 
-        路由/检索/生成模式选择/TheMealDB 兜底逻辑与 ask() 完全一致(刻意保留
-        为一份独立实现,而不是让其中一个委托给另一个,这样 ask() 里非流式的
-        DeepSeek 调用、以及测试里对它的 mock,都不受影响);区别只在于所选生成
-        模式产出结果的方式:纯列表回答或固定提示语作为一个整体 yield 出去
-        (反正不调用 LLM,没什么好流式的),而 "detail"/"general" 的回答会随着
-        DeepSeek 逐步生成而增量 yield,使用
-        _generate_step_by_step_answer_stream()/_generate_basic_answer_stream(),
-        并沿用与 ask() 相同的、由 NO_RESULTS_MESSAGE 触发的 TheMealDB 兜底
-        (兜底过程如何对调用方保持"无感",而不是先闪一下"没找到"再切换到真正的
-        答案,见 _stream_with_no_results_guard())。
+        路由/检索/生成模式选择逻辑与 ask() 完全一致(刻意保留为一份独立实现,
+        而不是让其中一个委托给另一个,这样 ask() 里非流式的 DeepSeek 调用、
+        以及测试里对它的 mock,都不受影响);区别只在于所选生成模式产出结果的
+        方式:纯列表回答或固定提示语作为一个整体 yield 出去(反正不调用 LLM,
+        没什么好流式的),而 "detail"/"general" 的回答会随着 DeepSeek 逐步生成
+        而增量 yield,使用
+        _generate_step_by_step_answer_stream()/_generate_basic_answer_stream()。
 
         Args:
             question: 用户的自然语言问题。
@@ -1382,6 +1143,7 @@ class SimpleRAG:
             按顺序产出的答案文本片段;把所有片段拼起来,得到的字符串
             与同样问题下 ask() 会返回的结果完全一致。
         """
+        # 输入校验
         if not question or not question.strip():
             yield "Please enter a question."
             return
@@ -1412,15 +1174,4 @@ class SimpleRAG:
             yield chunk
 
         if state.get("is_no_results"):
-            category, _ = self._infer_filters(search_query)
-            fallback_recipe = self._themealdb_fallback(search_query, category=category)
-            if fallback_recipe:
-                fallback_state: dict = {}
-                for chunk in generate_stream(question, [fallback_recipe], fallback_state):
-                    yield chunk
-                if fallback_state.get("is_no_results"):
-                    # 兜底的这篇菜谱同样答不了问题(与 ask() 一致:不再做第三次
-                    # 尝试,直接把两次都被按住的提示语放出来)。
-                    yield NO_RESULTS_MESSAGE
-            else:
-                yield NO_RESULTS_MESSAGE
+            yield NO_RESULTS_MESSAGE

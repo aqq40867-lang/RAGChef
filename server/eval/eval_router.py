@@ -20,13 +20,13 @@ Requires a real DEEPSEEK_API_KEY in server/.env (server/tests/conftest.py's
 placeholder key would make every call fail and silently fall back to
 "general" for all 30 questions, which is not a meaningful signal).
 
-Implementation note: query_router() only depends on self.client/self.model
+Implementation note: query_router() only depends on self.llm/self.model
 (via SimpleRAG._complete) -- it never touches self.documents/embedder/
 vector_index/bm25. So instead of calling SimpleRAG(data_path), which would
 also load the sentence-transformers embedding model and build/load the
 FAISS + BM25 indexes (slow, and irrelevant to what's being measured here),
 this script builds a SimpleRAG instance via __new__ and sets only
-.client/.model directly. If query_router() ever starts reading another
+.llm/.model directly. If query_router() ever starts reading another
 instance attribute, this shortcut needs to grow the same attribute.
 
 # 中文说明:
@@ -39,10 +39,10 @@ instance attribute, this shortcut needs to grow the same attribute.
 # 真实的 DEEPSEEK_API_KEY(不能用测试用的占位 key,否则每次调用都失败,
 # 全部兜底成 general,测出来的"准确率"没有意义)。
 #
-# 实现上的小技巧: query_router() 只依赖 self.client/self.model,完全不需要
+# 实现上的小技巧: query_router() 只依赖 self.llm/self.model,完全不需要
 # 加载菜谱、embedding 模型、FAISS/BM25 索引这些重量级的初始化步骤。所以这
 # 里没有走正常的 SimpleRAG(data_path) 构造流程,而是用 __new__ 跳过 __init__,
-# 手动只设置 client/model 这两个属性,评测跑起来快很多。
+# 手动只设置 llm/model 这两个属性,评测跑起来快很多。
 """
 
 import json
@@ -74,7 +74,10 @@ def build_router_only_rag() -> SimpleRAG:
     exercise query_router() -- see module docstring.
     """
     # 中文: 用 __new__ 绕过 __init__,只手动装配 query_router() 真正需要的两个
-    # 属性(client、model),省掉加载知识库和建索引的开销。
+    # 属性(llm、model),省掉加载知识库和建索引的开销。字段名必须是 llm 而不是
+    # client——这是 SimpleRAG 实际用的属性名(_complete() 读的是 self.llm),
+    # 这个脚本之前一直手动装配成 self.client,从没被这条路径实际调用过,
+    # 所以没人发现装错了名字,一直是跑不动的死代码。
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key or api_key == "test-key-for-unit-tests":
         raise SystemExit(
@@ -85,7 +88,7 @@ def build_router_only_rag() -> SimpleRAG:
         )
     instance = SimpleRAG.__new__(SimpleRAG)
     instance.model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL)
-    instance.client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+    instance.llm = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
     return instance
 
 

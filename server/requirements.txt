@@ -4,18 +4,12 @@ openai
 httpx
 python-dotenv
 
-# LangChain: orchestrates the LLM calls (ChatOpenAI, pointed at DeepSeek's
-# OpenAI-compatible endpoint) and the retrieval building blocks (FAISS
-# vector store, BM25Retriever, HuggingFaceEmbeddings, PromptTemplate).
-# See rag.py's module docstring for which parts are still hand-rolled
-# (parent/child chunking, RRF + per-parent score aggregation, TheMealDB
-# fallback) and why.
-langchain
-langchain-core
-langchain-openai
-langchain-community
-langchain-huggingface
-
+# LLM calls go straight through the `openai` client above (pointed at
+# DeepSeek's OpenAI-compatible endpoint). Retrieval is built directly on
+# faiss-cpu (vector index), rank-bm25 (keyword index) and
+# sentence-transformers (BGE embeddings) -- no LangChain in between.
+# See rag.py's module docstring for which parts are hand-rolled
+# (parent/child chunking, RRF + per-parent score aggregation) and why.
 faiss-cpu
 rank-bm25
 sentence-transformers

@@ -2,31 +2,58 @@
 # Covers: root health check, /ask happy path with mocked LLM,
 # /ask returning a friendly 500 on unexpected errors, and 422 on missing "question".
 #
-# 中文: LLM 调用通过 rag.llm(LangChain 的 ChatOpenAI)进行,所以这里跟
-# test_ask_mocked.py 一样,在 ChatOpenAI 类上 monkeypatch invoke/stream,
-# 而不是旧版直接 mock rag.client.chat.completions.create。
+# 中文: LLM 调用通过 rag.llm(openai 官方 SDK 的 OpenAI 客户端)进行,所以这里
+# 跟 test_ask_mocked.py 一样,直接在 app_module.rag.llm.chat.completions 这个
+# 实例上 monkeypatch .create,而不是 patch 某个类。
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, AIMessageChunk
-from langchain_openai import ChatOpenAI
 
 import app as app_module
 
 client = TestClient(app_module.app)
 
 
-def _fake_invoke(text):
-    def invoke(self, *args, **kwargs):
-        return AIMessage(content=text)
-
-    return invoke
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
 
 
-def _fake_stream(*texts):
-    def stream(self, *args, **kwargs):
-        for t in texts:
-            yield AIMessageChunk(content=t)
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
 
-    return stream
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.choices = [_FakeChoice(content)]
+
+
+def _fake_create(text):
+    def create(*args, **kwargs):
+        return _FakeResponse(text)
+
+    return create
+
+
+class _FakeDelta:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChunkChoice:
+    def __init__(self, content):
+        self.delta = _FakeDelta(content)
+
+
+class _FakeChunk:
+    def __init__(self, content):
+        self.choices = [_FakeChunkChoice(content)]
+
+
+def _fake_stream_create(*texts):
+    def create(*args, **kwargs):
+        return (_FakeChunk(t) for t in texts)
+
+    return create
 
 
 def test_root_endpoint_reports_running():
@@ -36,7 +63,9 @@ def test_root_endpoint_reports_running():
 
 
 def test_ask_endpoint_returns_mocked_answer(monkeypatch):
-    monkeypatch.setattr(ChatOpenAI, "invoke", _fake_invoke("Mocked answer."))
+    monkeypatch.setattr(
+        app_module.rag.llm.chat.completions, "create", _fake_create("Mocked answer.")
+    )
 
     resp = client.post("/ask", json={"question": "How do I make dumplings?"})
 
@@ -62,11 +91,10 @@ def test_ask_endpoint_rejects_missing_question_field():
 
 
 def test_ask_stream_endpoint_streams_list_answer_without_llm_call(monkeypatch):
-    def fail(self, *args, **kwargs):
+    def fail(*args, **kwargs):
         raise AssertionError("LLM should not be called for a rule-matched list route")
-        yield  # pragma: no cover - makes this a generator function, never reached
 
-    monkeypatch.setattr(ChatOpenAI, "stream", fail)
+    monkeypatch.setattr(app_module.rag.llm.chat.completions, "create", fail)
 
     resp = client.post("/ask/stream", json={"question": "Recommend a few dessert recipes"})
 
@@ -76,12 +104,14 @@ def test_ask_stream_endpoint_streams_list_answer_without_llm_call(monkeypatch):
 
 
 def test_ask_stream_endpoint_returns_streamed_answer(monkeypatch):
-    # query_rewrite() makes one non-streaming call (ChatOpenAI.invoke), then
-    # generation streams via ChatOpenAI.stream -- mirror both.
-    monkeypatch.setattr(
-        ChatOpenAI, "invoke", _fake_invoke("How do I make Kung Pao Chicken?")
-    )
-    monkeypatch.setattr(ChatOpenAI, "stream", _fake_stream("Mocked ", "streamed answer."))
+    # query_rewrite() and the streamed generation both go through the same
+    # chat.completions.create(), distinguished only by stream=True.
+    def fake_create(*args, stream=False, **kwargs):
+        if stream:
+            return (_FakeChunk(t) for t in ["Mocked ", "streamed answer."])
+        return _FakeResponse("How do I make Kung Pao Chicken?")
+
+    monkeypatch.setattr(app_module.rag.llm.chat.completions, "create", fake_create)
 
     resp = client.post("/ask/stream", json={"question": "How do I make Kung Pao Chicken?"})
 
