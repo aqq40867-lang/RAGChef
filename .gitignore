@@ -26,3 +26,7 @@ __pycache__/
 .idea/
 
 文档/
+
+# Extension build output and dependencies
+extension/dist/
+node_modules/
