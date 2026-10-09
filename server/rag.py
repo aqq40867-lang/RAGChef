@@ -672,13 +672,26 @@ class SimpleRAG:
         top_k: int = 2,
         category: str | None = None,
         difficulty: str | None = None,
+        *,
+        retriever: str = "hybrid",
+        rrf_k: int = RRF_K,
+        use_filters: bool = True,
     ) -> list[Recipe]:
-        """返回与问题最相关的 top_k 篇父 Recipe 对象"""
+        """返回与问题最相关的 top_k 篇父 Recipe 对象
+
+        仅关键字参数 retriever / rrf_k / use_filters 是给检索评估脚本
+        (server/eval/eval_retrieval.py)做对比实验用的,默认值与线上行为一致:
+            retriever: "hybrid"(向量+BM25 经 RRF 融合)、"vector" 或 "bm25"。
+            rrf_k: RRF 平滑常数,默认 RRF_K。
+            use_filters: False 时跳过 _infer_filters() 的分类/难度自动推断。
+        """
+        if retriever not in ("hybrid", "vector", "bm25"):
+            raise ValueError(f"unknown retriever: {retriever!r}")
         top_k = min(top_k, len(self.documents))
         if top_k == 0:
             return []
 
-        if category is None and difficulty is None:
+        if use_filters and category is None and difficulty is None:
             category, difficulty = self._infer_filters(question)
 
         allowed_chunks = None
@@ -697,10 +710,19 @@ class SimpleRAG:
             # (allowed_chunks 保持 None),而不是直接返回空结果。
 
         pool_size = len(allowed_chunks) if allowed_chunks is not None else len(self.child_chunks)
-        vector_ranked = self._vector_search(question, k=pool_size, allowed=allowed_chunks)
-        bm25_ranked = self._bm25_search(question, k=pool_size, allowed=allowed_chunks)
+        ranked_lists = []
+        if retriever in ("hybrid", "vector"):
+            ranked_lists.append(
+                self._vector_search(question, k=pool_size, allowed=allowed_chunks)
+            )
+        if retriever in ("hybrid", "bm25"):
+            ranked_lists.append(
+                self._bm25_search(question, k=pool_size, allowed=allowed_chunks)
+            )
 
-        fused_scores = self._rrf_fuse(vector_ranked, bm25_ranked)
+        # 单路检索时 RRF 只是把名次换算成分数,排序与原始名次一致,
+        # 这样后面的父文档聚合逻辑三种模式可以共用。
+        fused_scores = self._rrf_fuse(*ranked_lists, k=rrf_k)
         if not fused_scores:
             return []
         ranked_child_indices = sorted(fused_scores, key=lambda i: fused_scores[i], reverse=True)
